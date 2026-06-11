@@ -8,9 +8,11 @@ const app = {
   currentAuthorIndex: 0,
   currentQuoteId: 0,
   leaderboard: {},
-  onlineUsers: [],
+  onlineUsers: new Map(),
   username: 'Anonymous',
   debounceTimer: null,
+  chatMessages: [],
+  broadcastChannel: null,
 
   init() {
     this.loadData();
@@ -21,8 +23,62 @@ const app = {
     this.randomQuote();
     this.renderStats();
     this.loadLeaderboard();
-    this.simulateOnlineUsers();
+    this.setupBroadcast();
     this.loadUsername();
+    this.simulateOnlineUsers();
+  },
+
+  setupBroadcast() {
+    try {
+      this.broadcastChannel = new BroadcastChannel('inspireflow_chat');
+      this.broadcastChannel.onmessage = (e) => {
+        const { type, data } = e.data;
+        if (type === 'user_online') {
+          this.onlineUsers.set(data.username, data);
+          this.renderOnlineUsers();
+        } else if (type === 'chat_message') {
+          this.chatMessages.push(data);
+          this.renderChatMessages();
+        } else if (type === 'user_offline') {
+          this.onlineUsers.delete(data.username);
+          this.renderOnlineUsers();
+        }
+      };
+      this.broadcastOnline();
+      window.addEventListener('beforeunload', () => this.broadcastOffline());
+    } catch (e) {
+      console.log('BroadcastChannel not supported, using localStorage fallback');
+      setInterval(() => this.syncWithLocalStorage(), 1000);
+    }
+  },
+
+  syncWithLocalStorage() {
+    const stored = localStorage.getItem('online_chat');
+    const data = stored ? JSON.parse(stored) : { users: {}, messages: [] };
+    data.users[this.username] = { username: this.username, time: new Date().toLocaleTimeString() };
+    localStorage.setItem('online_chat', JSON.stringify(data));
+  },
+
+  broadcastOnline() {
+    const msg = {
+      type: 'user_online',
+      data: { username: this.username, time: new Date().toLocaleTimeString(), id: Math.random() }
+    };
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage(msg);
+    }
+    this.onlineUsers.set(this.username, msg.data);
+    this.renderOnlineUsers();
+  },
+
+  broadcastOffline() {
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage({
+        type: 'user_offline',
+        data: { username: this.username }
+      });
+    }
+    this.onlineUsers.delete(this.username);
   },
 
   loadData() {
@@ -37,6 +93,9 @@ const app = {
     
     const user = localStorage.getItem('username');
     if (user) this.username = user;
+    
+    const msgs = localStorage.getItem('chat_messages');
+    if (msgs) this.chatMessages = JSON.parse(msgs).slice(-100);
   },
 
   generateQuotes() {
@@ -60,6 +119,9 @@ const app = {
   setupEventListeners() {
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') this.closeModals();
+      if (e.key === 'Enter' && document.getElementById('messageInput') === document.activeElement) {
+        this.sendMessage();
+      }
     });
   },
 
@@ -75,18 +137,18 @@ const app = {
 
   randomQuote() {
     const q = this.quotes[Math.floor(Math.random() * this.quotes.length)];
-    const author = this.authors.find(a => a.category === q.category) || this.authors[0];
+    const author = this.authors[Math.floor(Math.random() * this.authors.length)];
     this.displayQuote(q, author);
   },
 
   nextQuote() {
     this.currentQuoteIndex = (this.currentQuoteIndex + 1) % this.quotes.length;
-    this.displayQuote(this.quotes[this.currentQuoteIndex], this.authors[this.currentAuthorIndex]);
+    this.displayQuote(this.quotes[this.currentQuoteIndex], this.authors[Math.floor(Math.random() * this.authors.length)]);
   },
 
   prevQuote() {
     this.currentQuoteIndex = (this.currentQuoteIndex - 1 + this.quotes.length) % this.quotes.length;
-    this.displayQuote(this.quotes[this.currentQuoteIndex], this.authors[this.currentAuthorIndex]);
+    this.displayQuote(this.quotes[this.currentQuoteIndex], this.authors[Math.floor(Math.random() * this.authors.length)]);
   },
 
   displayQuote(q, author) {
@@ -168,7 +230,7 @@ const app = {
       html += '<p class="empty-state">No history yet</p>';
     } else {
       this.history.slice().reverse().forEach(q => {
-        html += `<div class="glass-card quote-list-card"><p>${q.text}</p><small>${q.category}</small></div>`;
+        html += `<div class='glass-card quote-list-card'><p>${q.text}</p><small>${q.category}</small></div>`;
       });
     }
     content.innerHTML = html;
@@ -281,43 +343,73 @@ const app = {
   },
 
   simulateOnlineUsers() {
-    const users = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve'];
-    this.onlineUsers = users.map(u => ({ name: u, status: 'online', time: new Date().toLocaleTimeString() }));
     this.renderOnlineUsers();
   },
 
   renderOnlineUsers() {
     const container = document.getElementById('onlineUsersList');
-    container.innerHTML = this.onlineUsers.map(u => `<div class='quote-list-card'><strong>🟢 ${u.name}</strong><small>${u.time}</small></div>`).join('') || '<p class="empty-state">No users online</p>';
+    if (this.onlineUsers.size === 0) {
+      container.innerHTML = '<p class="empty-state">No users online</p>';
+      return;
+    }
+    container.innerHTML = Array.from(this.onlineUsers.values()).map(u => `<div class='quote-list-card'><strong>🟢 ${u.username}</strong><small>${u.time}</small></div>`).join('');
+  },
+
+  renderChatMessages() {
+    const container = document.getElementById('chatMessages');
+    container.innerHTML = this.chatMessages.map((msg, i) => `
+      <div class='quote-list-card' style='${msg.username === this.username ? 'background: rgba(36, 107, 107, 0.2); border-left: 3px solid var(--accent);' : ''}'>  
+        <strong>${msg.username}:</strong> ${msg.text}
+        <small>${msg.time}</small>
+      </div>
+    `).join('');
+    container.scrollTop = container.scrollHeight;
   },
 
   setUsername() {
     const input = document.getElementById('usernameInput');
     const username = input.value.trim();
-    if (username) {
+    if (username && username.length > 0 && username.length < 30) {
       this.username = username;
       localStorage.setItem('username', username);
       document.getElementById('currentUsername').textContent = username;
       input.value = '';
       this.showToast(`✓ Username set to ${username}`);
+      this.broadcastOnline();
       this.loadLeaderboard();
+    } else {
+      this.showToast('Username must be 1-30 characters');
     }
   },
 
   sendMessage() {
     const input = document.getElementById('messageInput');
     const msg = input.value.trim();
-    if (msg) {
-      const chat = document.getElementById('chatMessages');
-      const newMsg = document.createElement('div');
-      newMsg.className = 'quote-list-card';
-      newMsg.innerHTML = `<strong>${this.username}:</strong> ${msg}<small>${new Date().toLocaleTimeString()}</small>`;
-      chat.appendChild(newMsg);
-      chat.scrollTop = chat.scrollHeight;
+    if (msg && msg.length > 0 && msg.length < 500) {
+      const messageObj = {
+        username: this.username,
+        text: msg,
+        time: new Date().toLocaleTimeString(),
+        id: Date.now()
+      };
+      this.chatMessages.push(messageObj);
+      this.chatMessages = this.chatMessages.slice(-100);
+      localStorage.setItem('chat_messages', JSON.stringify(this.chatMessages));
+      
+      if (this.broadcastChannel) {
+        this.broadcastChannel.postMessage({
+          type: 'chat_message',
+          data: messageObj
+        });
+      }
+      
+      this.renderChatMessages();
       input.value = '';
+      
       if (!this.leaderboard[this.username]) this.leaderboard[this.username] = 0;
       this.leaderboard[this.username]++;
       localStorage.setItem('leaderboard', JSON.stringify(this.leaderboard));
+      this.loadLeaderboard();
     }
   },
 
@@ -330,7 +422,10 @@ const app = {
     if (section === 'authors') this.renderAuthors();
     if (section === 'categories') this.renderCategories();
     if (section === 'leaderboard') this.loadLeaderboard();
-    if (section === 'online') this.simulateOnlineUsers();
+    if (section === 'online') {
+      this.simulateOnlineUsers();
+      this.renderChatMessages();
+    }
     if (section === 'stats') this.renderStats();
   },
 
